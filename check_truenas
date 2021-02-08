@@ -1,0 +1,83 @@
+#!/usr/bin/env python
+
+from requests.auth import HTTPBasicAuth
+import requests
+import pprint
+import json
+import click
+import humanfriendly
+
+
+def auth(cmd):
+    cmd = click.option("--user", "-u", help="Truenas user")(cmd)
+    cmd = click.option("--pw", "-p", help="Truenas user pw")(cmd)
+
+    return cmd
+
+def get_data(device_url, user, pw, api_path):
+    return requests.get(device_url + "/api/v2.0/" + api_path, auth=HTTPBasicAuth(user, pw))
+
+
+@click.group()
+def cli():
+    pass
+
+
+@cli.command("pool")
+@click.argument("device_url", nargs=1)
+@auth
+def pool(user, pw, device_url):
+    """ Show pools """
+    pool_data = get_data(device_url, user, pw, "pool")
+    pool_dict = json.loads(pool_data.content)
+    dataset_data = get_data(device_url, user, pw, "pool/dataset")
+    dataset_dict = json.loads(dataset_data.content)
+    #pprint.pprint(response_dict)
+    print()
+
+    for pool in pool_dict:
+        print(pool["name"])
+        print(pool["path"])
+        print(pool["status"])
+        for dataset in dataset_dict:
+            if dataset["name"] == pool["name"]:
+                ava = int(dataset["available"]["rawvalue"])
+                used = int(dataset["used"]["rawvalue"])
+                size = ava + used
+                perc_used = round((used * 100) / size)
+                print("Size: " + humanfriendly.format_size(size, binary=True))
+                print("Used: {} {}%".format(humanfriendly.format_size(used, binary=True), str(perc_used)))
+                # TODO
+                # check disks
+
+
+@cli.command("replication")
+@click.argument("device_url", nargs=1)
+@auth
+def replication(user, pw, device_url):
+    """ Show replications """
+    repl_data = get_data(device_url, user, pw, "replication")
+    repl_dict = json.loads(repl_data.content)
+    pprint.pprint(repl_dict)
+    # TODO
+
+
+@cli.command("alert")
+@click.argument("device_url", nargs=1)
+@auth
+def alertss(user, pw, device_url):
+    """ Show alertss """
+    alert_data = get_data(device_url, user, pw, "/alert/list")
+    alert_dict = json.loads(alert_data.content)
+    pprint.pprint(alert_dict)
+    # TODO
+    #'level': 'WARNING', ## check defekte disk
+
+
+if __name__ == "__main__":
+    cli()
+
+
+
+
+
