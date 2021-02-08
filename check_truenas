@@ -1,21 +1,32 @@
 #!/usr/bin/env python
 
-from requests.auth import HTTPBasicAuth
+from requests.exceptions import ConnectionError
 import requests
-import pprint
 import json
 import click
 import humanfriendly
+import urllib3
+import sys
+#import pprint
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def auth(cmd):
-    cmd = click.option("--user", "-u", help="Truenas user")(cmd)
-    cmd = click.option("--pw", "-p", help="Truenas user pw")(cmd)
+    cmd = click.option("--token", "-t", help="Truenas api token")(cmd)
 
     return cmd
 
-def get_data(device_url, user, pw, api_path):
-    return requests.get(device_url + "/api/v2.0/" + api_path, auth=HTTPBasicAuth(user, pw))
+def get_data(device_url, token, api_path):
+    try:
+        return requests.get(
+            device_url + "/api/v2.0/" + api_path,
+            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer {}'.format(token)},
+            verify=False
+        )
+    except ConnectionError as e:
+        click.echo(e)
+        sys.exit(2)
 
 
 @click.group()
@@ -23,55 +34,99 @@ def cli():
     pass
 
 
-@cli.command("pool")
+@cli.command("pools")
 @click.argument("device_url", nargs=1)
+@click.option("--warning", "-w", default=int(70), help="Warning usage threshold")
+@click.option("--critical", "-c", default=int(80), help="Critical usage threshold")
 @auth
-def pool(user, pw, device_url):
-    """ Show pools """
-    pool_data = get_data(device_url, user, pw, "pool")
+def pools(token, device_url, warning, critical):
+    """
+    Example:
+    check_truenas pool -t token_here https://192.168.168.210 -w 82 -c 92
+    """
+    pool_data = get_data(device_url, token, "pool")
     pool_dict = json.loads(pool_data.content)
-    dataset_data = get_data(device_url, user, pw, "pool/dataset")
+    dataset_data = get_data(device_url, token, "pool/dataset")
     dataset_dict = json.loads(dataset_data.content)
-    #pprint.pprint(response_dict)
-    print()
+    critical_problems = []
+    warning_problems = []
 
     for pool in pool_dict:
-        print(pool["name"])
-        print(pool["path"])
-        print(pool["status"])
+        click.echo("Pool {}:".format(pool["name"]))
+        click.echo("    Path: {}".format(pool["path"]))
+        status = pool["status"]
+        if status != "ONLINE":
+            critical_problems.append("CRITAL {} status: {}".format(pool["name"], status))
+        click.echo("    Status: {}".format(status))
         for dataset in dataset_dict:
             if dataset["name"] == pool["name"]:
                 ava = int(dataset["available"]["rawvalue"])
                 used = int(dataset["used"]["rawvalue"])
                 size = ava + used
                 perc_used = round((used * 100) / size)
-                print("Size: " + humanfriendly.format_size(size, binary=True))
-                print("Used: {} {}%".format(humanfriendly.format_size(used, binary=True), str(perc_used)))
-                # TODO
-                # check disks
+                if perc_used > warning:
+                    warning_problems.append("WARNING {} usage {}%".format(dataset["name"], perc_used))
+                if perc_used > critical:
+                    critical_problems.append("CRITICAL {} usage {}%".format(dataset["name"], perc_used))
+                click.echo("     Size {}: ".format(humanfriendly.format_size(size, binary=True)))
+                click.echo("     Used: {} {}%\n".format(humanfriendly.format_size(used, binary=True), str(perc_used)))
+
+    if critical_problems:
+        for p in critical_problems:
+            click.echo(p)
+        sys.exit(1)
+    if warning_problems:
+        for p in warning_problems:
+            click.echo(p)
+        sys.exit(2)
+
+    sys.exit(0)
 
 
-@cli.command("replication")
+@cli.command("replications")
 @click.argument("device_url", nargs=1)
 @auth
-def replication(user, pw, device_url):
-    """ Show replications """
-    repl_data = get_data(device_url, user, pw, "replication")
+def replications(token, device_url):
+    repl_data = get_data(device_url, token, "replication")
     repl_dict = json.loads(repl_data.content)
-    pprint.pprint(repl_dict)
-    # TODO
+    errors = []
+
+    for repl in repl_dict:
+        click.echo("Replication job {}:".format(repl["name"]))
+        state = repl["state"]["state"]
+        if state == "ERROR":
+            errors.append("ERROR: Problem with job {}".format(repl["name"]))
+        click.echo("    State: {}\n".format(state))
+
+    if errors:
+        for e in errors:
+            click.echo(e)
+        sys.exit(1)
+
+    sys.exit(0)
 
 
-@cli.command("alert")
+@cli.command("alerts")
 @click.argument("device_url", nargs=1)
 @auth
-def alertss(user, pw, device_url):
-    """ Show alertss """
-    alert_data = get_data(device_url, user, pw, "/alert/list")
+def alerts(token, device_url):
+    alert_data = get_data(device_url, token, "/alert/list")
     alert_dict = json.loads(alert_data.content)
-    pprint.pprint(alert_dict)
-    # TODO
-    #'level': 'WARNING', ## check defekte disk
+    #pprint.pprint(alert_dict)
+    critical_problems = []
+
+    for alert in alert_dict:
+        click.echo("{}:".format(alert["level"]))
+        click.echo("{}\n".format(alert["formatted"]))
+        if alert["level"] == "CRITICAL":
+            critical_problems.append("CRITICAL:\n{}".format(alert["formatted"]))
+
+    if critical_problems:
+        for p in critical_problems:
+            click.echo(p)
+        sys.exit(1)
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":
