@@ -20,7 +20,7 @@ def auth(cmd):
 def get_data(device_url, token, api_path):
     try:
         return requests.get(
-            device_url + "/api/v2.0/" + api_path,
+            "https://{}/api/v2.0/{}".format(device_url, api_path),
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer {}'.format(token)},
             verify=False
         )
@@ -42,7 +42,7 @@ def cli():
 def pools(token, device_url, warning, critical):
     """
     Example:
-    check_truenas pool -t token_here https://192.168.168.210 -w 82 -c 92
+    check_truenas pool -t token_here 192.168.168.210 -w 82 -c 92
     """
     pool_data = get_data(device_url, token, "pool")
     pool_dict = json.loads(pool_data.content)
