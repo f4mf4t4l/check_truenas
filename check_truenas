@@ -1,132 +1,162 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 from requests.exceptions import ConnectionError
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 import requests
 import json
 import click
 import humanfriendly
 import urllib3
 import sys
-#import pprint
+from NagiosCheckHelper import NagErrors, NagEval
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+class Globals(object):
+    def __init__(self, token=None, host=None):
+        self.token = token
+        self.host = host
 
 
-def auth(cmd):
-    cmd = click.option("--token", "-t", help="Truenas api token")(cmd)
-
-    return cmd
-
-def get_data(device_url, token, api_path):
+@click.pass_context
+def get_data(ctx, api_path):
     try:
-        return requests.get(
-            "https://{}/api/v2.0/{}".format(device_url, api_path),
-            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer {}'.format(token)},
+        res = requests.get(
+            "https://{}/api/v2.0/{}".format(ctx.obj.host, api_path),
+            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer {}'.format(ctx.obj.token)},
             verify=False
         )
-    except ConnectionError as e:
+        res.raise_for_status()
+        return res
+    except (ConnectionError, Exception) as e:
         click.echo(e)
         sys.exit(2)
 
+@click.pass_context
+def post_data(ctx, api_path):
+    try:
+        res = requests.post(
+            "https://{}/api/v2.0/{}".format(ctx.obj.host, api_path),
+            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer {}'.format(ctx.obj.token)},
+            verify=False
+        )
+        res.raise_for_status()
+        return res
+    except (ConnectionError, Exception) as e:
+        click.echo(e)
+        sys.exit(2)
 
 @click.group()
-def cli():
-    pass
+@click.option("--token", "-t", help="Truenas api token")
+@click.option("--host", "-H", help="Truenas host name or IP")
+@click.pass_context
+def cli(ctx, token, host):
+    """This script uses the TrueNas REST API v2.0 to monitor the TrueNAS device.
+
+    \b
+    Examples:
+    check_truenas -t token_here -H 192.168.168.210 pools -w 82 -c 92
+    
+    check_truenas -t token_here -H 192.168.168.210 alerts
+    
+    check_truenas -t token_here -H 192.168.168.210 replications
+
+    """
+    ctx.obj = Globals(token, host)
 
 
 @cli.command("pools")
-@click.argument("device_url", nargs=1)
 @click.option("--warning", "-w", default=int(70), help="Warning usage threshold")
 @click.option("--critical", "-c", default=int(80), help="Critical usage threshold")
-@auth
-def pools(token, device_url, warning, critical):
-    """
-    Example:
-    check_truenas pool -t token_here 192.168.168.210 -w 82 -c 92
-    """
-    pool_data = get_data(device_url, token, "pool")
+def pools(warning, critical):
+    nerr = NagErrors()
+    neval = NagEval(nerr)
+
+    pool_data = get_data("pool")
     pool_dict = json.loads(pool_data.content)
-    dataset_data = get_data(device_url, token, "pool/dataset")
+    dataset_data = get_data("pool/dataset")
     dataset_dict = json.loads(dataset_data.content)
-    critical_problems = []
-    warning_problems = []
+    
+    if len(pool_dict) < 1:
+        nerr.addUnknown("No pools found")
+        nerr.printStatus()
+        nerr.doExit()
 
     for pool in pool_dict:
+        neval.evalEnum(pool["status"], defaultStatus="CRITICAL", okValues=["ONLINE"], prefixText="{} pool status ".format(pool["name"]))
         click.echo("Pool {}:".format(pool["name"]))
         click.echo("    Path: {}".format(pool["path"]))
-        status = pool["status"]
-        if status != "ONLINE":
-            critical_problems.append("CRITAL {} status: {}".format(pool["name"], status))
-        click.echo("    Status: {}".format(status))
+        click.echo("    Status: {}".format(pool["status"]))
+
         for dataset in dataset_dict:
-            if dataset["name"] == pool["name"]:
-                ava = int(dataset["available"]["rawvalue"])
-                used = int(dataset["used"]["rawvalue"])
-                size = ava + used
-                perc_used = round((used * 100) / size)
-                if perc_used > warning:
-                    warning_problems.append("WARNING {} usage {}%".format(dataset["name"], perc_used))
-                if perc_used > critical:
-                    critical_problems.append("CRITICAL {} usage {}%".format(dataset["name"], perc_used))
-                click.echo("     Size {}: ".format(humanfriendly.format_size(size, binary=True)))
-                click.echo("     Used: {} {}%\n".format(humanfriendly.format_size(used, binary=True), str(perc_used)))
+            if dataset["name"] != pool["name"]:
+                continue
+            ava = int(dataset["available"]["rawvalue"])
+            used = int(dataset["used"]["rawvalue"])
+            size = ava + used
+            perc_used = round((used * 100) / size)
+            testResult = neval.evalNumberAsc(perc_used, warningAbove=warning, criticalAbove=critical, prefixText="Dataset {} ".format(dataset["name"]), numberUnits="%")
+            click.echo("    Size {}: ".format(humanfriendly.format_size(size, binary=True)))
+            click.echo("    Used: {} {}%".format(humanfriendly.format_size(used, binary=True), str(perc_used)))
+            click.echo("    {}\n".format(testResult))
 
-    if critical_problems:
-        for p in critical_problems:
-            click.echo(p)
-        sys.exit(1)
-    if warning_problems:
-        for p in warning_problems:
-            click.echo(p)
-        sys.exit(2)
-
-    sys.exit(0)
+    nerr.printStatus()
+    nerr.doExit()
 
 
 @cli.command("replications")
-@click.argument("device_url", nargs=1)
-@auth
-def replications(token, device_url):
-    repl_data = get_data(device_url, token, "replication")
-    repl_dict = json.loads(repl_data.content)
-    errors = []
+def replications():
+    nerr = NagErrors()
 
+    repl_data = get_data("replication")
+    repl_dict = json.loads(repl_data.content)
+
+    if len(repl_dict) < 1:
+        nerr.addUnknown("No replication job's found")
+        nerr.printStatus()
+        nerr.doExit()
+    
     for repl in repl_dict:
-        click.echo("Replication job {}:".format(repl["name"]))
         state = repl["state"]["state"]
         if state == "ERROR":
-            errors.append("ERROR: Problem with job {}".format(repl["name"]))
+            nerr.addCritical("Problem with job {}".format(repl["name"]))
+        click.echo("Replication job {}:".format(repl["name"]))
         click.echo("    State: {}\n".format(state))
 
-    if errors:
-        for e in errors:
-            click.echo(e)
-        sys.exit(1)
-
-    sys.exit(0)
+    nerr.printStatus()
+    nerr.doExit()
 
 
 @cli.command("alerts")
-@click.argument("device_url", nargs=1)
-@auth
-def alerts(token, device_url):
-    alert_data = get_data(device_url, token, "/alert/list")
+def alerts():
+    nerr = NagErrors()
+
+    alert_data = get_data("/alert/list")
     alert_dict = json.loads(alert_data.content)
-    #pprint.pprint(alert_dict)
-    critical_problems = []
 
     for alert in alert_dict:
         click.echo("{}:".format(alert["level"]))
         click.echo("{}\n".format(alert["formatted"]))
+        if alert["level"] == "WARNING":
+            nerr.addWarning("{}".format(alert["formatted"]))
         if alert["level"] == "CRITICAL":
-            critical_problems.append("CRITICAL:\n{}".format(alert["formatted"]))
+            nerr.addCritical("{}".format(alert["formatted"]))
 
-    if critical_problems:
-        for p in critical_problems:
-            click.echo(p)
-        sys.exit(1)
+    nerr.doExit()
 
-    sys.exit(0)
+
+@cli.command("updates")
+def alerts():
+    nerr = NagErrors()
+    neval = NagEval(nerr)
+
+    data = post_data("/update/check_available")
+    ddict = json.loads(data.content)
+
+    neval.evalEnum(ddict["status"], okValues=['UNAVAILABLE'], warningValues=['AVAILABLE'], criticalValues=['HA_UNAVAILABLE', 'REBOOT_REQUIRED'])
+    nerr.printStatus()
+    nerr.doExit()
 
 
 if __name__ == "__main__":
