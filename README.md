@@ -3,7 +3,7 @@ Check Plugin for truenas 2.0 API
 
 ## Install dependencies:
 
-(apt/yum/dnf) install python3
+(apt/yum/dnf) install python3 python3-pip
 
 pip3 install requests click humanfriendly NagiosCheckHelper
 
